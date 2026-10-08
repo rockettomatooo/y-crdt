@@ -694,8 +694,20 @@ impl ItemPtr {
             && self.is_deleted() == other.is_deleted()
             && (self.redone.is_none() && other.redone.is_none())
             && (!self.info.is_linked() && !other.info.is_linked()) // linked items cannot be merged
-            && self.content.try_squash(&other.content)
         {
+            let delta = match self.parent.as_branch() {
+                Some(parent) if !self.is_deleted() && self.is_countable() => {
+                    let kind = parent.marker_offset_kind.unwrap_or(OffsetKind::Bytes);
+                    self.content_len(kind)
+                }
+                _ => 0,
+            };
+            if !self.content.try_squash(&other.content) {
+                return false;
+            }
+            if let Some(parent) = self.parent.as_branch().copied() {
+                crate::search_marker::on_squash(parent, *self, other, delta);
+            }
             self.len = self.content.len(OffsetKind::Utf16);
             if let Some(mut right_right) = other.right {
                 right_right.left = Some(*self);

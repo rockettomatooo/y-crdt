@@ -1,4 +1,6 @@
 use crate::block::{Block, Item, ItemContent, ItemPosition, ItemPtr, Prelim};
+use crate::doc::OffsetKind;
+use crate::search_marker::SearchMarker;
 use crate::types::array::ArrayEvent;
 use crate::types::map::MapEvent;
 use crate::types::text::TextEvent;
@@ -189,6 +191,13 @@ pub struct Branch {
 
     pub(crate) has_formatting: bool,
 
+    /// Blocks remembered so the next index lookup can start near the target.
+    /// Not part of the encoded document. See `search_marker`.
+    pub(crate) search_markers: Vec<SearchMarker>,
+
+    /// Offset kind the marker indexes were counted in. A mismatch clears the list.
+    pub(crate) marker_offset_kind: Option<OffsetKind>,
+
     pub(crate) observers: Observer<ObserveFn>,
 
     pub(crate) deep_observers: Observer<DeepObserveFn>,
@@ -232,6 +241,8 @@ impl Branch {
             observers: Observer::default(),
             deep_observers: Observer::default(),
             has_formatting: false,
+            search_markers: Vec::new(),
+            marker_offset_kind: None,
         })
     }
 

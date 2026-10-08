@@ -88,6 +88,10 @@ impl GCCollector {
                     let block = unsafe { client.get(index).unwrap_unchecked() }.as_mut();
                     if let Block::Item(item) = block {
                         if item.is_deleted() && !item.info.is_keep() {
+                            if let Some(parent) = item.parent.as_branch().copied() {
+                                let ptr = crate::block::ItemPtr::from(item.as_ref());
+                                crate::search_marker::forget_item(parent, ptr);
+                            }
                             let gc = Block::GC(item.block_range());
                             *block = gc;
                         }

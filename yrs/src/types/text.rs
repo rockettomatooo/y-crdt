@@ -214,7 +214,9 @@ pub trait Text: AsRef<Branch> + Sized {
             return;
         }
         let this = BranchPtr::from(self.as_ref());
-        if let Some(mut pos) = find_position(this, txn, index) {
+        if let Some(mut pos) = find_position(this, txn, index, true) {
+            let kind = txn.store().offset_kind;
+            crate::search_marker::note_visible_change(this, kind, index, chunk_len(chunk, kind));
             let value = crate::block::PrelimString(chunk.into());
             while let Some(right) = pos.right.as_ref() {
                 if right.is_deleted() {
@@ -236,6 +238,9 @@ pub trait Text: AsRef<Branch> + Sized {
         P: Prelim,
     {
         let branch = BranchPtr::from(self.as_ref());
+        // A delta walks from the start, so the marker list would be rebuilt from a
+        // moving cursor. Drop it and let the next index lookup record a fresh one.
+        crate::search_marker::clear(branch);
         let mut pos = ItemPosition {
             parent: TypePtr::Branch(branch),
             left: None,
@@ -283,7 +288,11 @@ pub trait Text: AsRef<Branch> + Sized {
             return;
         }
         let this = BranchPtr::from(self.as_ref());
-        if let Some(mut pos) = find_position(this, txn, index) {
+        // Formatting has to see every format item to the left, so this lookup does
+        // not start at a marker. The index shift is still recorded.
+        if let Some(mut pos) = find_position(this, txn, index, false) {
+            let kind = txn.store().offset_kind;
+            crate::search_marker::note_visible_change(this, kind, index, chunk_len(chunk, kind));
             let value = block::PrelimString(chunk.into());
             insert(this, txn, &mut pos, value, attributes);
         } else {
@@ -303,7 +312,9 @@ pub trait Text: AsRef<Branch> + Sized {
         V: Into<EmbedPrelim<V>> + Prelim,
     {
         let this = BranchPtr::from(self.as_ref());
-        if let Some(pos) = find_position(this, txn, index) {
+        if let Some(pos) = find_position(this, txn, index, true) {
+            let kind = txn.store().offset_kind;
+            crate::search_marker::note_visible_change(this, kind, index, 1);
             let ptr = txn
                 .create_item(&pos, content.into(), None)
                 .expect("cannot insert empty value");
@@ -336,7 +347,9 @@ pub trait Text: AsRef<Branch> + Sized {
         V: Into<EmbedPrelim<V>> + Prelim,
     {
         let this = BranchPtr::from(self.as_ref());
-        if let Some(mut pos) = find_position(this, txn, index) {
+        if let Some(mut pos) = find_position(this, txn, index, false) {
+            let kind = txn.store().offset_kind;
+            crate::search_marker::note_visible_change(this, kind, index, 1);
             let item = insert(this, txn, &mut pos, embed.into(), attributes)
                 .expect("cannot insert empty value");
             if let Ok(integrated) = item.try_into() {
@@ -360,7 +373,9 @@ pub trait Text: AsRef<Branch> + Sized {
     /// insufficient number of characters to remove) or `index` is outside of the bounds of text.
     fn remove_range(&self, txn: &mut TransactionMut, index: u32, len: u32) {
         let this = BranchPtr::from(self.as_ref());
-        if let Some(mut pos) = find_position(this, txn, index) {
+        if let Some(mut pos) = find_position(this, txn, index, true) {
+            let kind = txn.store().offset_kind;
+            crate::search_marker::note_visible_change(this, kind, index, -(len as i32));
             remove(txn, &mut pos, len)
         } else {
             panic!("The type or the position doesn't exist!");
@@ -371,7 +386,7 @@ pub trait Text: AsRef<Branch> + Sized {
     /// formatting blocks containing provided `attributes` metadata.
     fn format(&self, txn: &mut TransactionMut, index: u32, len: u32, attributes: Attrs) {
         let this = BranchPtr::from(self.as_ref());
-        if let Some(mut pos) = find_position(this, txn, index) {
+        if let Some(mut pos) = find_position(this, txn, index, false) {
             insert_format(this, txn, &mut pos, len, attributes)
         } else {
             panic!("Index {} is outside of the range.", index);
@@ -731,21 +746,41 @@ pub(crate) fn update_current_attributes(attrs: &mut Attrs, key: &str, value: &An
     }
 }
 
-fn find_position(this: BranchPtr, txn: &mut TransactionMut, index: u32) -> Option<ItemPosition> {
-    let mut pos = {
-        ItemPosition {
-            parent: this.into(),
-            left: None,
-            right: this.start,
-            index: 0,
-            current_attrs: None,
-        }
+fn chunk_len(chunk: &str, kind: OffsetKind) -> i32 {
+    let n = match kind {
+        OffsetKind::Bytes => chunk.len(),
+        OffsetKind::Utf16 => chunk.encode_utf16().count(),
     };
+    n as i32
+}
+
+fn find_position(
+    this: BranchPtr,
+    txn: &mut TransactionMut,
+    index: u32,
+    use_markers: bool,
+) -> Option<ItemPosition> {
+    let mut pos = ItemPosition {
+        parent: this.into(),
+        left: None,
+        right: this.start,
+        index: 0,
+        current_attrs: None,
+    };
+    let mut remaining = index;
+    if use_markers {
+        if let Some((marker, marker_index)) = crate::search_marker::track(this, txn, index) {
+            if marker_index <= index {
+                pos.left = marker.left;
+                pos.right = Some(marker);
+                remaining = index - marker_index;
+            }
+        }
+    }
 
     let mut format_ptrs = HashMap::new();
     let store = txn.store_mut();
     let encoding = store.offset_kind;
-    let mut remaining = index;
     while let Some(right) = pos.right {
         if remaining == 0 {
             break;

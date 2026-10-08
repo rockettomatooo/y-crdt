@@ -1034,6 +1034,10 @@ impl<'doc> TransactionMut<'doc> {
 
         for (ptr, subs) in self.changed.iter() {
             if let TypePtr::Branch(branch) = ptr {
+                if !self.local {
+                    // Remote items are integrated by id. Marker indexes would be stale.
+                    crate::search_marker::clear(*branch);
+                }
                 if branch.has_formatting && !self.local {
                     self.needs_cleanup = true;
                 }
