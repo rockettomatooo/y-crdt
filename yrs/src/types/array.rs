@@ -187,8 +187,10 @@ pub trait Array: AsRef<Branch> + Sized {
     where
         V: Prelim,
     {
-        let mut walker = BlockIter::new(BranchPtr::from(self.as_ref()));
-        if walker.try_forward(txn, index) {
+        let branch = BranchPtr::from(self.as_ref());
+        let mut walker = BlockIter::at_write(branch, txn, index);
+        let rest = index - walker.index();
+        if walker.try_forward(txn, rest) {
             let ptr = walker
                 .insert_contents(txn, value)
                 .expect("cannot insert empty value");
@@ -251,8 +253,10 @@ pub trait Array: AsRef<Branch> + Sized {
     /// not all expected elements were removed (due to insufficient number of elements in an array)
     /// or `index` is outside of the bounds of an array.
     fn remove_range(&self, txn: &mut TransactionMut, index: u32, len: u32) {
-        let mut walker = BlockIter::new(BranchPtr::from(self.as_ref()));
-        if walker.try_forward(txn, index) {
+        let branch = BranchPtr::from(self.as_ref());
+        let mut walker = BlockIter::at_write(branch, txn, index);
+        let rest = index - walker.index();
+        if walker.try_forward(txn, rest) {
             walker.delete(txn, len)
         } else {
             panic!("Index {} is outside of the range of an array", index);
@@ -262,8 +266,10 @@ pub trait Array: AsRef<Branch> + Sized {
     /// Retrieves a value stored at a given `index`. Returns `None` when provided index was out
     /// of the range of a current array.
     fn get<T: ReadTxn>(&self, txn: &T, index: u32) -> Option<Out> {
-        let mut walker = BlockIter::new(BranchPtr::from(self.as_ref()));
-        if walker.try_forward(txn, index) {
+        let branch = BranchPtr::from(self.as_ref());
+        let mut walker = BlockIter::at_read(branch, index);
+        let rest = index - walker.index();
+        if walker.try_forward(txn, rest) {
             walker.read_value(txn)
         } else {
             None

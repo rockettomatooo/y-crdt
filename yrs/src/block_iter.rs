@@ -28,6 +28,42 @@ impl BlockIter {
         }
     }
 
+    /// Start at the nearest search marker. Marker indexes are updated, so this
+    /// requires a write transaction.
+    pub fn at_write(branch: BranchPtr, txn: &mut TransactionMut, index: u32) -> Self {
+        if let Some((ptr, marker_index)) = crate::search_marker::track(branch, txn, index) {
+            if marker_index <= index {
+                return BlockIter {
+                    branch,
+                    index: marker_index,
+                    rel: 0,
+                    next_item: Some(ptr),
+                    reached_end: false,
+                };
+            }
+        }
+        BlockIter::new(branch)
+    }
+
+    /// Start at a marker that already lies at or before `index`. Does not write markers.
+    pub fn at_read(branch: BranchPtr, index: u32) -> Self {
+        if let Some((ptr, marker_index)) = crate::search_marker::hint(branch, index) {
+            return BlockIter {
+                branch,
+                index: marker_index,
+                rel: 0,
+                next_item: Some(ptr),
+                reached_end: false,
+            };
+        }
+        BlockIter::new(branch)
+    }
+
+    #[inline]
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
     #[inline]
     pub fn rel(&self) -> u32 {
         self.rel
@@ -184,6 +220,8 @@ impl BlockIter {
     }
 
     pub fn delete(&mut self, txn: &mut TransactionMut, mut len: u32) {
+        let kind = txn.store().offset_kind;
+        crate::search_marker::note_visible_change(self.branch, kind, self.index, -(len as i32));
         let mut item = self.next_item;
         if self.index + len > self.branch.content_len() {
             panic!("Length exceeded");
@@ -334,7 +372,9 @@ impl BlockIter {
         let parent = TypePtr::Branch(self.branch);
         let right = self.right();
         let left = self.left();
+        let kind = txn.store().offset_kind;
         let (mut content, remainder) = value.into_content(txn);
+        let added = content.len(kind);
         let inner_ref = if let ItemContent::Type(inner_ref) = &mut content {
             Some(BranchPtr::from(inner_ref))
         } else {
@@ -351,6 +391,9 @@ impl BlockIter {
             content,
         )?;
         let block_ptr = txn.integrate_item(block, 0);
+        if added > 0 {
+            crate::search_marker::note_visible_change(self.branch, kind, self.index, added as i32);
+        }
 
         if let Some(remainder) = remainder {
             remainder.integrate(txn, inner_ref.unwrap().into())

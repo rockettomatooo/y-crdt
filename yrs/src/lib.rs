@@ -641,6 +641,7 @@ pub mod observer;
 mod out;
 mod slice;
 mod state_vector;
+mod search_marker;
 mod sticky_index;
 pub mod sync;
 #[cfg(test)]
