@@ -238,9 +238,10 @@ pub trait Text: AsRef<Branch> + Sized {
         P: Prelim,
     {
         let branch = BranchPtr::from(self.as_ref());
-        // A delta walks from the start, so the marker list would be rebuilt from a
-        // moving cursor. Drop it and let the next index lookup record a fresh one.
-        crate::search_marker::clear(branch);
+        // Yjs `applyDelta` walks from the start and calls `updateMarkerChanges`
+        // for each insert and delete. It does not clear the list. `pos.index`
+        // is a UTF-16 clock, so the visible index is taken from `content_len`,
+        // which uses the document's offset kind.
         let mut pos = ItemPosition {
             parent: TypePtr::Branch(branch),
             left: None,
@@ -248,6 +249,7 @@ pub trait Text: AsRef<Branch> + Sized {
             index: 0,
             current_attrs: Some(Box::new(Attrs::new())),
         };
+        let mut visible = 0u32;
         for delta in delta {
             match delta {
                 Delta::Inserted(value, attrs) => {
@@ -255,15 +257,42 @@ pub trait Text: AsRef<Branch> + Sized {
                         None => Attrs::new(),
                         Some(attrs) => *attrs,
                     };
+                    let before = branch.content_len;
                     insert(branch, txn, &mut pos, DeltaChunk(value), attrs);
+                    let added = branch.content_len.wrapping_sub(before);
+                    if added != 0 {
+                        let kind = txn.store().offset_kind;
+                        crate::search_marker::note_visible_change(
+                            branch,
+                            kind,
+                            visible,
+                            added as i32,
+                        );
+                        visible = visible.saturating_add(added);
+                    }
                 }
-                Delta::Deleted(len) => remove(txn, &mut pos, len),
+                Delta::Deleted(len) => {
+                    if len != 0 {
+                        let kind = txn.store().offset_kind;
+                        crate::search_marker::note_visible_change(
+                            branch,
+                            kind,
+                            visible,
+                            -(len as i32),
+                        );
+                    }
+                    remove(txn, &mut pos, len);
+                }
                 Delta::Retain(len, attrs) => {
                     let attrs: Attrs = match attrs {
                         None => Attrs::new(),
                         Some(attrs) => *attrs,
                     };
+                    // Format items are not countable. Yjs `formatText` does not
+                    // call `updateMarkerChanges`. A split keeps the left item's
+                    // start index.
                     insert_format(branch, txn, &mut pos, len, attrs);
+                    visible = visible.saturating_add(len);
                 }
             }
         }

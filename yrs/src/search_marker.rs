@@ -38,6 +38,11 @@ fn fresh_timestamp() -> u32 {
     MARKER_CLOCK.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Drop every marker.
+///
+/// Yjs does this from `_callObserver` when `!transaction.local`. Remote items
+/// are integrated by id, so a visible index would be a guess. Local edits,
+/// including [crate::Text::apply_delta], update indexes instead.
 pub(crate) fn clear(mut branch: BranchPtr) {
     branch.search_markers.clear();
 }
@@ -148,7 +153,10 @@ pub(crate) fn track<T: ReadTxn>(
 
 /// Shift marker indexes around a local insert (`len > 0`) or delete (`len < 0`).
 ///
-/// Call this with the visible index *before* the structure changes.
+/// `index` is the visible index where the change starts, counted before the
+/// change. Yjs `updateMarkerChanges` takes the same pair. A delete in Yjs
+/// records it after walking the removed items, but that walk does not advance
+/// the index, so the value is still the start of the deletion.
 pub(crate) fn note_visible_change(mut branch: BranchPtr, kind: OffsetKind, index: u32, len: i32) {
     if branch.search_markers.is_empty() || len == 0 {
         return;
@@ -274,11 +282,12 @@ pub(crate) fn assert_consistent(branch: BranchPtr, kind: OffsetKind) {
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use super::assert_consistent;
-    use crate::types::Attrs;
+    use crate::branch::{Branch, BranchPtr};
+    use crate::doc::{OffsetKind, Options};
+    use crate::types::{Attrs, Delta};
     use crate::updates::decoder::Decode;
-    use crate::branch::Branch;
     use crate::{Any, Array, Doc, GetString, ReadTxn, Text, TextRef, Transact, Update};
 
     fn check(text: &TextRef, txn: &impl ReadTxn) {
@@ -340,7 +349,9 @@ mod tests {
             text.insert(&mut txn, 5, " world");
             check(&text, &txn);
         }
-        let update = doc.transact().encode_diff_v1(&crate::StateVector::default());
+        let update = doc
+            .transact()
+            .encode_diff_v1(&crate::StateVector::default());
 
         let remote = Doc::new();
         let remote_text = remote.get_or_insert_text("text");
@@ -384,5 +395,81 @@ mod tests {
         assert_eq!(array.get(&txn, 0).unwrap().cast::<i64>().unwrap(), 5);
         assert_eq!(array.get(&txn, 5).unwrap().cast::<i64>().unwrap(), 1000);
         assert_eq!(array.len(&txn), 46);
+        let branch: &Branch = array.as_ref();
+        assert_consistent(BranchPtr::from(branch), txn.store().offset_kind);
+    }
+
+    #[test]
+    fn markers_survive_commit_squash() {
+        let doc = Doc::new();
+        let text = doc.get_or_insert_text("text");
+        {
+            let mut txn = doc.transact_mut();
+            for _ in 0..20 {
+                let end = text.len(&txn);
+                text.insert(&mut txn, end, "ab");
+            }
+            check(&text, &txn);
+        }
+        {
+            let mut txn = doc.transact_mut();
+            check(&text, &txn);
+            text.insert(&mut txn, 10, "Q");
+            assert_eq!(&text.get_string(&txn)[8..14], "abQaba");
+            check(&text, &txn);
+        }
+    }
+
+    #[test]
+    fn format_leaves_marker_indexes_in_place() {
+        let doc = Doc::new();
+        let text = doc.get_or_insert_text("text");
+        let mut txn = doc.transact_mut();
+        text.insert(&mut txn, 0, "hello world");
+        text.insert(&mut txn, 5, "X");
+        let bold = Attrs::from([("bold".into(), Any::Bool(true))]);
+        text.format(&mut txn, 0, 5, bold);
+        assert_eq!(text.get_string(&txn), "helloX world");
+        check(&text, &txn);
+        let end = text.len(&txn);
+        text.insert(&mut txn, end, "!");
+        assert_eq!(text.get_string(&txn), "helloX world!");
+        check(&text, &txn);
+    }
+
+    #[test]
+    fn markers_follow_utf16_offsets() {
+        let doc = Doc::with_options(Options {
+            offset_kind: OffsetKind::Utf16,
+            ..Default::default()
+        });
+        let text = doc.get_or_insert_text("text");
+        let mut txn = doc.transact_mut();
+        text.insert(&mut txn, 0, "aa★aa");
+        text.insert(&mut txn, 4, "Z");
+        check(&text, &txn);
+        text.insert(&mut txn, 2, "Q");
+        assert_eq!(text.get_string(&txn), "aaQ★aZa");
+        assert_eq!(text.len(&txn), 7);
+        check(&text, &txn);
+    }
+
+    #[test]
+    fn apply_delta_updates_markers() {
+        let doc = Doc::new();
+        let text = doc.get_or_insert_text("text");
+        let mut txn = doc.transact_mut();
+        text.insert(&mut txn, 0, "hello");
+        text.insert(&mut txn, 5, " world");
+        check(&text, &txn);
+        text.apply_delta(
+            &mut txn,
+            [Delta::retain(5), Delta::insert(","), Delta::retain(6)],
+        );
+        assert_eq!(text.get_string(&txn), "hello, world");
+        check(&text, &txn);
+        text.insert(&mut txn, 6, "X");
+        assert_eq!(text.get_string(&txn), "hello,X world");
+        check(&text, &txn);
     }
 }
