@@ -290,8 +290,13 @@ pub trait Text: AsRef<Branch> + Sized {
                     };
                     // Format items are not countable. Yjs `formatText` does not
                     // call `updateMarkerChanges`. A split keeps the left item's
-                    // start index.
+                    // start index. The epoch bump drops a cursor's cached
+                    // attributes, which were collected by walking format items.
+                    let formats = !attrs.is_empty();
                     insert_format(branch, txn, &mut pos, len, attrs);
+                    if formats {
+                        crate::search_marker::bump_edit_epoch(branch);
+                    }
                     visible = visible.saturating_add(len);
                 }
             }
@@ -397,14 +402,10 @@ pub trait Text: AsRef<Branch> + Sized {
         self.insert(txn, idx, chunk)
     }
 
-    /// A cursor parked at `index`. Later inserts through it reuse that gap.
+    /// A cursor parked at `index`. Later inserts through it reuse that gap,
+    /// including after this transaction commits.
     ///
-    /// `insert` finds the gap by walking from the start of the text, or from the
-    /// nearest search marker. The cursor remembers the character it sits after, so
-    /// the next insert does not walk the characters in front of it. Commit frees
-    /// squashed blocks; the next use finds the character by id instead of keeping
-    /// the pointer. Another edit on this text makes the cursor rebuild its
-    /// formatting attributes once.
+    /// Panics if `index` is greater than the length of the text.
     ///
     /// ```
     /// use yrs::{Doc, GetString, Text, Transact};

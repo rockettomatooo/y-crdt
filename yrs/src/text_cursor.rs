@@ -1,16 +1,25 @@
-//! An insertion gap in a [Text] or [XmlText].
+//! A remembered insertion point in a [Text] or [XmlText].
 //!
-//! [Text::insert] turns an integer index into a gap by walking blocks. A cursor
-//! remembers the gap: the id of the character it sits after. Inserting there does
-//! not walk the characters in front of it.
+//! [Text::insert] takes an integer and walks to that character. A cursor keeps the
+//! gap, so the next insert does not walk the characters in front of it. An edit
+//! made somewhere else leaves the gap on the same character.
 //!
-//! The pointer itself is only valid until [TransactionMut::commit]. Commit squashes
-//! neighboring blocks and frees the right-hand one. The cursor keeps the id and
-//! finds the block again with [Store::follow_redone], which is a binary search in
-//! that client's block list.
+//! ```
+//! use yrs::{Doc, GetString, Text, Transact};
 //!
-//! Formatting attributes are the set of format items to the left of the gap. Those
-//! are cached and rebuilt when something other than this cursor edits the branch.
+//! let doc = Doc::new();
+//! let text = doc.get_or_insert_text("t");
+//! let mut cursor = {
+//!     let mut txn = doc.transact_mut();
+//!     text.insert(&mut txn, 0, "hello");
+//!     text.cursor(&mut txn, 5)
+//! };
+//! {
+//!     let mut txn = doc.transact_mut();
+//!     cursor.insert(&mut txn, "!");
+//! }
+//! assert_eq!(text.get_string(&doc.transact()), "hello!");
+//! ```
 
 use crate::block::{ItemContent, ItemPosition, ItemPtr, PrelimString};
 use crate::branch::BranchPtr;
@@ -424,14 +433,16 @@ fn measure(
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use super::*;
     use crate::branch::Branch;
     use crate::search_marker::assert_consistent;
+    use crate::test_utils::exchange_updates;
     use crate::types::text::YChange;
-    use crate::updates::decoder::Decode;
-    use crate::updates::encoder::Encode;
-    use crate::{Any, Doc, GetString, OffsetKind, Options, Out, ReadTxn, Text, Transact, Update};
+    use crate::{
+        Any, Doc, GetString, OffsetKind, Options, Out, Text, Transact, XmlFragment,
+        XmlTextPrelim,
+    };
 
     fn branch_of(text: &impl crate::Text) -> BranchPtr {
         let branch: &Branch = text.as_ref();
@@ -464,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_in_the_middle_uses_markers() {
+    fn inserts_in_the_middle() {
         let doc = Doc::new();
         let text = doc.get_or_insert_text("t");
         let mut txn = doc.transact_mut();
@@ -503,7 +514,7 @@ mod tests {
             let mut txn = local.transact_mut();
             local_text.insert(&mut txn, 0, "hello");
         }
-        exchange(&local, &remote);
+        exchange_updates(&[&local, &remote]);
         let mut cursor = {
             let mut txn = local.transact_mut();
             let end = local_text.len(&txn);
@@ -513,7 +524,7 @@ mod tests {
             let mut txn = remote.transact_mut();
             remote_text.insert(&mut txn, 0, "X");
         }
-        exchange(&local, &remote);
+        exchange_updates(&[&local, &remote]);
         {
             let mut txn = local.transact_mut();
             assert_eq!(cursor.index(&mut txn), 6);
@@ -576,16 +587,80 @@ mod tests {
         assert_eq!(text.len(&txn), 8);
     }
 
-    fn exchange(a: &Doc, b: &Doc) {
-        for (src, dst) in [(a, b), (b, a)] {
-            let src_txn = src.transact();
-            let mut dst_txn = dst.transact_mut();
-            let sv = dst_txn.state_vector().encode_v1();
-            let update =
-                src_txn.encode_diff_v1(&crate::StateVector::decode_v1(sv.as_slice()).unwrap());
-            dst_txn
-                .apply_update(Update::decode_v1(update.as_slice()).unwrap())
-                .unwrap();
+    #[test]
+    fn inserts_where_the_anchored_character_was_deleted() {
+        let doc = Doc::new();
+        let text = doc.get_or_insert_text("t");
+        let mut cursor = {
+            let mut txn = doc.transact_mut();
+            text.insert(&mut txn, 0, "hello");
+            text.cursor(&mut txn, 1)
+        };
+        {
+            let mut txn = doc.transact_mut();
+            text.remove_range(&mut txn, 0, 1);
         }
+        {
+            let mut txn = doc.transact_mut();
+            cursor.insert(&mut txn, "X");
+        }
+        assert_eq!(text.get_string(&doc.transact()), "Xello");
+    }
+
+    #[test]
+    fn concurrent_inserts_at_the_same_gap() {
+        let local = Doc::with_client_id(1);
+        let remote = Doc::with_client_id(2);
+        let local_text = local.get_or_insert_text("t");
+        let remote_text = remote.get_or_insert_text("t");
+        {
+            let mut txn = local.transact_mut();
+            local_text.insert(&mut txn, 0, "hello");
+        }
+        exchange_updates(&[&local, &remote]);
+        let mut local_cursor = {
+            let mut txn = local.transact_mut();
+            let end = local_text.len(&txn);
+            local_text.cursor(&mut txn, end)
+        };
+        let mut remote_cursor = {
+            let mut txn = remote.transact_mut();
+            let end = remote_text.len(&txn);
+            remote_text.cursor(&mut txn, end)
+        };
+        {
+            let mut txn = local.transact_mut();
+            local_cursor.insert(&mut txn, "A");
+        }
+        {
+            let mut txn = remote.transact_mut();
+            remote_cursor.insert(&mut txn, "B");
+        }
+        exchange_updates(&[&local, &remote]);
+        let local_txn = local.transact();
+        let remote_txn = remote.transact();
+        assert_eq!(local_text.get_string(&local_txn), "helloAB");
+        assert_eq!(remote_text.get_string(&remote_txn), "helloAB");
+    }
+
+    #[test]
+    fn xml_text_cursor_inserts_across_transactions() {
+        let doc = Doc::new();
+        let fragment = doc.get_or_insert_xml_fragment("f");
+        let (text, mut cursor) = {
+            let mut txn = doc.transact_mut();
+            let text = fragment.insert(&mut txn, 0, XmlTextPrelim::new(""));
+            let cursor = text.cursor(&mut txn, 0);
+            (text, cursor)
+        };
+        {
+            let mut txn = doc.transact_mut();
+            cursor.insert(&mut txn, "ab");
+        }
+        {
+            let mut txn = doc.transact_mut();
+            cursor.insert(&mut txn, "c");
+        }
+        assert_eq!(text.get_string(&doc.transact()), "abc");
     }
 }
