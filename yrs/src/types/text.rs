@@ -290,8 +290,13 @@ pub trait Text: AsRef<Branch> + Sized {
                     };
                     // Format items are not countable. Yjs `formatText` does not
                     // call `updateMarkerChanges`. A split keeps the left item's
-                    // start index.
+                    // start index. The epoch bump drops a cursor's cached
+                    // attributes, which were collected by walking format items.
+                    let formats = !attrs.is_empty();
                     insert_format(branch, txn, &mut pos, len, attrs);
+                    if formats {
+                        crate::search_marker::bump_edit_epoch(branch);
+                    }
                     visible = visible.saturating_add(len);
                 }
             }
@@ -397,6 +402,31 @@ pub trait Text: AsRef<Branch> + Sized {
         self.insert(txn, idx, chunk)
     }
 
+    /// A cursor parked at `index`. Later inserts through it reuse that gap,
+    /// including after this transaction commits.
+    ///
+    /// Panics if `index` is greater than the length of the text.
+    ///
+    /// ```
+    /// use yrs::{Doc, GetString, Text, Transact};
+    ///
+    /// let doc = Doc::new();
+    /// let text = doc.get_or_insert_text("t");
+    /// let mut cursor = {
+    ///     let mut txn = doc.transact_mut();
+    ///     text.insert(&mut txn, 0, "hello");
+    ///     text.cursor(&mut txn, 5)
+    /// };
+    /// {
+    ///     let mut txn = doc.transact_mut();
+    ///     cursor.insert(&mut txn, "!");
+    /// }
+    /// assert_eq!(text.get_string(&doc.transact()), "hello!");
+    /// ```
+    fn cursor(&self, txn: &mut TransactionMut, index: u32) -> crate::TextCursor {
+        crate::TextCursor::at(BranchPtr::from(self.as_ref()), txn, index)
+    }
+
     /// Removes up to a `len` characters from a current text structure, starting at given `index`.
     /// This method panics in case when not all expected characters were removed (due to
     /// insufficient number of characters to remove) or `index` is outside of the bounds of text.
@@ -416,6 +446,9 @@ pub trait Text: AsRef<Branch> + Sized {
     fn format(&self, txn: &mut TransactionMut, index: u32, len: u32, attributes: Attrs) {
         let this = BranchPtr::from(self.as_ref());
         if let Some(mut pos) = find_position(this, txn, index, false) {
+            // Format items are not countable, so marker indexes stay put.
+            // The epoch still moves: a cursor's attribute map would be stale.
+            crate::search_marker::bump_edit_epoch(this);
             insert_format(this, txn, &mut pos, len, attributes)
         } else {
             panic!("Index {} is outside of the range.", index);
@@ -744,7 +777,7 @@ where
     asm.finish()
 }
 
-fn insert<P: Prelim>(
+pub(crate) fn insert<P: Prelim>(
     branch: BranchPtr,
     txn: &mut TransactionMut,
     pos: &mut ItemPosition,
@@ -775,7 +808,7 @@ pub(crate) fn update_current_attributes(attrs: &mut Attrs, key: &str, value: &An
     }
 }
 
-fn chunk_len(chunk: &str, kind: OffsetKind) -> i32 {
+pub(crate) fn chunk_len(chunk: &str, kind: OffsetKind) -> i32 {
     let n = match kind {
         OffsetKind::Bytes => chunk.len(),
         OffsetKind::Utf16 => chunk.encode_utf16().count(),
@@ -783,7 +816,7 @@ fn chunk_len(chunk: &str, kind: OffsetKind) -> i32 {
     n as i32
 }
 
-fn find_position(
+pub(crate) fn find_position(
     this: BranchPtr,
     txn: &mut TransactionMut,
     index: u32,
@@ -867,7 +900,7 @@ fn find_position(
     Some(pos)
 }
 
-fn remove(txn: &mut TransactionMut, pos: &mut ItemPosition, len: u32) {
+pub(crate) fn remove(txn: &mut TransactionMut, pos: &mut ItemPosition, len: u32) {
     let encoding = txn.store().offset_kind;
     let mut remaining = len;
     let start = pos.right.clone();

@@ -32,6 +32,10 @@ pub struct Store {
     pub(crate) skip_gc: bool,
     pub(crate) cleanup_formatting: bool,
 
+    /// Bumped at the end of every commit, after blocks have been squashed.
+    /// A block pointer cached before the bump can point at an item squash freed.
+    pub(crate) commit_gen: u64,
+
     /// Root types (a.k.a. top-level types). These types are defined by users at the document level,
     /// they have their own unique names and represent core shared types that expose operations
     /// which can be called concurrently by remote peers in a conflict-free manner.
@@ -71,6 +75,7 @@ impl Store {
             offset_kind: options.offset_kind,
             skip_gc: options.skip_gc,
             cleanup_formatting: options.cleanup_formatting,
+            commit_gen: 0,
             types: HashMap::default(),
             blocks: BlockStore::default(),
             subdocs: HashMap::default(),

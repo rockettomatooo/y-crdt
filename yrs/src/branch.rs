@@ -198,6 +198,11 @@ pub struct Branch {
     /// Offset kind the marker indexes were counted in. A mismatch clears the list.
     pub(crate) marker_offset_kind: Option<OffsetKind>,
 
+    /// Bumped when the visible sequence or its formatting changes.
+    /// A cursor uses this to tell whether the attributes it cached are still
+    /// the ones at its gap.
+    pub(crate) edit_epoch: u64,
+
     pub(crate) observers: Observer<ObserveFn>,
 
     pub(crate) deep_observers: Observer<DeepObserveFn>,
@@ -243,6 +248,7 @@ impl Branch {
             has_formatting: false,
             search_markers: Vec::new(),
             marker_offset_kind: None,
+            edit_epoch: 0,
         })
     }
 

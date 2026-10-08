@@ -38,12 +38,19 @@ fn fresh_timestamp() -> u32 {
     MARKER_CLOCK.fetch_add(1, Ordering::Relaxed)
 }
 
+pub(crate) fn bump_edit_epoch(mut branch: BranchPtr) {
+    branch.edit_epoch = branch.edit_epoch.wrapping_add(1);
+}
+
 /// Drop every marker.
 ///
 /// Yjs does this from `_callObserver` when `!transaction.local`. Remote items
 /// are integrated by id, so a visible index would be a guess. Local edits,
-/// including [crate::Text::apply_delta], update indexes instead.
+/// including [crate::Text::apply_delta], update indexes instead. The epoch
+/// bump is for [crate::TextCursor]: a remote edit can change formatting at
+/// the cursor's gap.
 pub(crate) fn clear(mut branch: BranchPtr) {
+    bump_edit_epoch(branch);
     branch.search_markers.clear();
 }
 
@@ -149,6 +156,9 @@ pub(crate) fn track<T: ReadTxn>(
 /// records it after walking the removed items, but that walk does not advance
 /// the index, so the value is still the start of the deletion.
 pub(crate) fn note_visible_change(mut branch: BranchPtr, kind: OffsetKind, index: u32, len: i32) {
+    if len != 0 {
+        bump_edit_epoch(branch);
+    }
     if branch.search_markers.is_empty() || len == 0 {
         return;
     }
