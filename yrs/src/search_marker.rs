@@ -119,20 +119,11 @@ pub(crate) fn track<T: ReadTxn>(
         }
     }
 
-    // Sit on the left neighbor of a run that commit-time squash would merge, so the
-    // marker does not point at a block that is about to be freed.
-    while let Some(left) = p.left {
-        let same_client = left.id().client == p.id().client;
-        let consecutive = left.id().clock + left.len() == p.id().clock;
-        if same_client && consecutive {
-            p = left;
-            if !p.is_deleted() && p.is_countable() {
-                pindex = pindex.saturating_sub(p.content_len(kind));
-            }
-        } else {
-            break;
-        }
-    }
+    // Stay on the block that contains `index`. Yjs `findMarker` walks left across
+    // a same-client, consecutive-clock run so the marker is not left on a block
+    // that commit will free. `on_squash` retargets the marker when that block is
+    // dropped. Walking left while the blocks are still alive sends the next
+    // lookup back to the start of the run.
 
     if pindex > index || p.is_deleted() || !p.is_countable() {
         return None;
