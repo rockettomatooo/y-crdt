@@ -137,11 +137,12 @@ impl TextCursor {
         self.note_local(txn);
     }
 
-    /// Insert `chunk` wrapped in `attributes`, and leave the cursor after the
-    /// closing format marker.
+    /// Insert `chunk` wrapped in `attributes`, and leave the cursor on that
+    /// text, before the closing format marker.
     ///
-    /// The attribute map at the gap is reused for the next call, until some other
-    /// edit changes this text.
+    /// The next call with the same map extends this span. Sitting after the
+    /// closer would open a new one on every call. Another edit to this text
+    /// drops the cached map.
     pub fn insert_with_attributes(
         &mut self,
         txn: &mut TransactionMut,
@@ -157,19 +158,18 @@ impl TextCursor {
         note_visible_change(self.branch, kind, self.index, added);
         self.skip_deleted();
         let mut pos = self.position();
-        if insert(
+        if let Some(inserted) = insert(
             self.branch,
             txn,
             &mut pos,
             PrelimString(chunk.into()),
             attributes,
-        )
-        .is_some()
-        {
-            self.left = pos.left;
-            self.right = pos.right;
-            self.anchor = pos.left.map(|item| item.last_id());
-            self.attrs = pos.current_attrs;
+        ) {
+            let item = inserted.item;
+            self.left = Some(item);
+            self.right = item.right;
+            self.anchor = Some(item.last_id());
+            self.attrs = inserted.attrs;
             if self.index_trusted {
                 self.index = self.index.saturating_add(added as u32);
             }
@@ -440,8 +440,7 @@ mod test {
     use crate::test_utils::exchange_updates;
     use crate::types::text::YChange;
     use crate::{
-        Any, Doc, GetString, OffsetKind, Options, Out, Text, Transact, XmlFragment,
-        XmlTextPrelim,
+        Any, Doc, GetString, OffsetKind, Options, Out, Text, Transact, XmlFragment, XmlTextPrelim,
     };
 
     fn branch_of(text: &impl crate::Text) -> BranchPtr {
@@ -662,5 +661,51 @@ mod test {
             cursor.insert(&mut txn, "c");
         }
         assert_eq!(text.get_string(&doc.transact()), "abc");
+    }
+
+    #[test]
+    fn plain_retain_keeps_an_end_cursor_in_the_same_transaction() {
+        use crate::types::Delta;
+        let doc = Doc::new();
+        let text = doc.get_or_insert_text("t");
+        let mut txn = doc.transact_mut();
+        text.insert(&mut txn, 0, "hello");
+        let mut cursor = text.cursor(&mut txn, 5);
+        text.apply_delta(&mut txn, [Delta::retain(2)]);
+        cursor.insert(&mut txn, "X");
+        assert_eq!(text.get_string(&txn), "helloX");
+    }
+
+    #[test]
+    fn a_cursor_at_the_end_survives_another_cursor_splitting_the_block() {
+        let doc = Doc::new();
+        let text = doc.get_or_insert_text("t");
+        let mut txn = doc.transact_mut();
+        text.insert(&mut txn, 0, "abcdefghij");
+        let mut end = text.cursor(&mut txn, 10);
+        let mut mid = text.cursor(&mut txn, 5);
+        end.insert(&mut txn, "X");
+        mid.insert(&mut txn, "Y");
+        assert_eq!(text.get_string(&txn), "abcdeYfghijX");
+    }
+
+    #[test]
+    fn attributed_inserts_in_one_transaction_stay_one_span() {
+        let bold = Attrs::from([("bold".into(), Any::Bool(true))]);
+        let doc = Doc::new();
+        let text = doc.get_or_insert_text("t");
+        let during = {
+            let mut txn = doc.transact_mut();
+            let mut cursor = text.cursor(&mut txn, 0);
+            for _ in 0..5 {
+                cursor.insert_with_attributes(&mut txn, "a", bold.clone());
+            }
+            text.diff(&txn, YChange::identity).len()
+        };
+        assert_eq!(during, 1, "during {}", during);
+        let txn = doc.transact();
+        let after = text.diff(&txn, YChange::identity).len();
+        assert_eq!(after, 1, "after {}", after);
+        assert_eq!(text.get_string(&txn), "aaaaa");
     }
 }

@@ -385,7 +385,8 @@ pub trait Text: AsRef<Branch> + Sized {
             let kind = txn.store().offset_kind;
             crate::search_marker::note_visible_change(this, kind, index, 1);
             let item = insert(this, txn, &mut pos, embed.into(), attributes)
-                .expect("cannot insert empty value");
+                .expect("cannot insert empty value")
+                .item;
             if let Ok(integrated) = item.try_into() {
                 integrated
             } else {
@@ -777,13 +778,19 @@ where
     asm.finish()
 }
 
+pub(crate) struct Inserted {
+    pub item: ItemPtr,
+    /// Formatting in effect on [`Self::item`], before the closing format marker.
+    pub attrs: Option<Box<Attrs>>,
+}
+
 pub(crate) fn insert<P: Prelim>(
     branch: BranchPtr,
     txn: &mut TransactionMut,
     pos: &mut ItemPosition,
     value: P,
     mut attributes: Attrs,
-) -> Option<ItemPtr> {
+) -> Option<Inserted> {
     pos.unset_missing(&mut attributes);
     minimize_attr_changes(pos, &attributes);
     let negated_attrs = insert_attributes(branch, txn, pos, attributes);
@@ -795,9 +802,10 @@ pub(crate) fn insert<P: Prelim>(
     } else {
         None
     };
+    let attrs = pos.current_attrs.clone();
 
     insert_negated_attributes(branch, txn, pos, negated_attrs);
-    item
+    item.map(|item| Inserted { item, attrs })
 }
 
 pub(crate) fn update_current_attributes(attrs: &mut Attrs, key: &str, value: &Any) {
