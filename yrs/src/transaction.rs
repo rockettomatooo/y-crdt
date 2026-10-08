@@ -1145,6 +1145,10 @@ impl<'doc> TransactionMut<'doc> {
             }
         }
 
+        // Squash frees the right-hand item. Anything that cached that pointer
+        // (a text cursor) has to look the position up by id next time.
+        self.store.commit_gen = self.store.commit_gen.wrapping_add(1);
+
         // 9. emit 'afterTransactionCleanup', 'update', 'updateV2'
         if let Some(mut events) = self.store.events.take() {
             events.emit_transaction_cleanup(self);
